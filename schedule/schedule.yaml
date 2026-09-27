@@ -1,0 +1,434 @@
+# =====================================================================
+# Schedule service - OpenAPI documentation
+# ---------------------------------------------------------------------
+# Port: 3202
+# Database: schedule/databases/times.json
+#
+# This service knows which movies are shown on which date (CRD, no update
+# needed). Booking calls it to check that a slot exists before a booking.
+#
+# Calls to other services (with requests.get):
+#   Schedule -> Movie : check the movie ids when a schedule is created,
+#                       and get movie details for /schedules/{date}/details
+# The caller's `Authorization` header is forwarded on these calls.
+#
+# Security: every endpoint except "/" needs a JWT issued by the User
+# service. Reading is open to every authenticated user; writing is
+# reserved to admins.
+# =====================================================================
+openapi: 3.0.3
+
+info:
+  title: Schedule Service API
+  version: "1.0.0"
+  description: |
+    Manages the dates on which the movies are shown.
+
+    ## Authentication (JWT)
+    Get a token with `POST /login` on the User service (port 3203), then send it
+    on every request: `Authorization: Bearer <token>`.
+    The token is checked locally with the shared secret `JWT_SECRET`.
+
+    - `401`: the token is missing, invalid or expired.
+    - `403`: the token is valid, but the operation needs the `admin` role.
+  contact:
+    name: Mbungai Francesco
+
+servers:
+  - url: http://localhost:3202
+    description: Local development server
+
+tags:
+  - name: user
+    description: Operations available to every authenticated user
+  - name: admin
+    description: Secured admin-only calls
+
+# By default every endpoint needs a JWT
+security:
+  - bearerAuth: []
+
+paths:
+  # -------------------------------------------------------------------
+  # Home page (public)
+  # -------------------------------------------------------------------
+  /:
+    get:
+      tags: [user]
+      summary: Service home page
+      operationId: home
+      security: []
+      responses:
+        "200":
+          description: HTML welcome message
+          content:
+            text/html:
+              schema:
+                type: string
+                example: "<h1 style='color:blue'>Welcome to the Showtime service!</h1>"
+
+  # -------------------------------------------------------------------
+  # Whole schedule / create a date
+  # -------------------------------------------------------------------
+  /schedules:
+    get:
+      tags: [user]
+      summary: Get the full schedule
+      operationId: getSchedules
+      security: []
+      responses:
+        "200":
+          description: All the dates with their movies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Schedule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    post:
+      tags: [admin]
+      summary: Create a schedule for a date
+      description: |
+        Creates a new date with its list of movies. When the date already exists,
+        the movies that are not in it yet are added to it.
+        Each movie id is checked with the Movie service (`GET /movies/{movieid}`).
+      operationId: createSchedule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Schedule"
+            example:
+              date: "20151210"
+              movies:
+                - 720d006c-3a57-4b6a-b18f-9b713b073f3c
+                - a8034f44-aee4-44cf-b32c-74cf452aaaae
+      responses:
+        "201":
+          description: Schedule created or updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: One of the movie ids does not exist in the Movie service
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "unknown movie: 00000000-0000-0000-0000-000000000000"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  # -------------------------------------------------------------------
+  # One date
+  # -------------------------------------------------------------------
+  /schedules/{date}:
+    parameters:
+      - $ref: "#/components/parameters/Date"
+
+    get:
+      tags: [user]
+      summary: Get the movies shown on a date
+      operationId: getScheduleByDate
+      security: []
+      responses:
+        "200":
+          description: Schedule of the date
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      tags: [admin]
+      summary: Delete a whole date
+      operationId: deleteSchedule
+      responses:
+        "200":
+          description: Date deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+              example:
+                message: schedule deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # -------------------------------------------------------------------
+  # One slot (date + movie)
+  # GET is called by the Booking service to validate a booking.
+  # -------------------------------------------------------------------
+  /schedules/{date}/movies/{movieid}:
+    parameters:
+      - $ref: "#/components/parameters/Date"
+      - $ref: "#/components/parameters/MovieId"
+
+    get:
+      tags: [user]
+      summary: Check that a movie is shown on a date
+      operationId: checkSlot
+      security: []
+      responses:
+        "200":
+          description: The slot exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Slot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      tags: [admin]
+      summary: Remove one movie from a date
+      operationId: deleteSlot
+      responses:
+        "200":
+          description: Movie removed. Returns the updated date.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # -------------------------------------------------------------------
+  # Extra endpoints that combine data
+  # -------------------------------------------------------------------
+
+  # Schedule -> Movie: replaces each movie id with the full movie
+  /schedules/{date}/details:
+    get:
+      tags: [user]
+      summary: "[extra] Get the full details of the movies shown on a date"
+      description: Calls the Movie service (`GET /movies/{movieid}`) for each movie of the date.
+      operationId: getScheduleDetails
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Date"
+      responses:
+        "200":
+          description: Detailed schedule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DetailedSchedule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  # Reverse search: on which dates is a movie shown?
+  /schedules/movies/{movieid}:
+    get:
+      tags: [user]
+      summary: "[extra] Get all the dates on which a movie is shown"
+      operationId: getDatesForMovie
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/MovieId"
+      responses:
+        "200":
+          description: Dates of this movie (may be empty)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MovieDates"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+# =====================================================================
+# Reusable components
+# =====================================================================
+components:
+  # JWT issued by the User service
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "JWT from `POST /login` on the User service. Header: `Authorization: Bearer <token>`"
+
+  parameters:
+    Date:
+      name: date
+      in: path
+      required: true
+      description: Date in the format YYYYMMDD (same format as times.json)
+      schema:
+        type: string
+        pattern: '^\d{8}$'
+      example: "20151201"
+    MovieId:
+      name: movieid
+      in: path
+      required: true
+      description: Movie id (UUID)
+      schema:
+        type: string
+      example: 267eedb8-0f5d-42d5-8f43-72426b9fb3e6
+
+  # Common error responses
+  responses:
+    BadRequest:
+      description: The request body is missing or invalid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "missing field: date"
+    Unauthorized:
+      description: The JWT is missing, invalid or expired
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          example: Bearer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: token is missing or invalid
+    Forbidden:
+      description: The operation needs the admin role
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: forbidden
+    NotFound:
+      description: The date (or the movie on this date) does not exist
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: schedule not found
+    BadGateway:
+      description: The Movie service is down or returned an unexpected error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: Movie service unavailable
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    Message:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+
+    # Same format as an entry of times.json
+    Schedule:
+      type: object
+      required: [date, movies]
+      properties:
+        date:
+          type: string
+          pattern: '^\d{8}$'
+          example: "20151201"
+        movies:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            description: Movie id
+          example:
+            - 267eedb8-0f5d-42d5-8f43-72426b9fb3e6
+            - 7daf7208-be4d-4944-a3ae-c1c2f516f3e6
+
+    Slot:
+      type: object
+      properties:
+        date:
+          type: string
+          example: "20151201"
+        movieid:
+          type: string
+          example: 267eedb8-0f5d-42d5-8f43-72426b9fb3e6
+        scheduled:
+          type: boolean
+          example: true
+
+    MovieDates:
+      type: object
+      properties:
+        movieid:
+          type: string
+          example: 39ab85e5-5e8e-4dc5-afea-65dc368bd7ab
+        dates:
+          type: array
+          items:
+            type: string
+            pattern: '^\d{8}$'
+          example: ["20151130", "20151201", "20151202", "20151203"]
+
+    # Movie as returned by the Movie service
+    Movie:
+      type: object
+      properties:
+        id:
+          type: string
+          example: 267eedb8-0f5d-42d5-8f43-72426b9fb3e6
+        title:
+          type: string
+          example: Creed
+        rating:
+          type: number
+          format: float
+          example: 8.8
+        director:
+          type: string
+          example: Ryan Coogler
+
+    DetailedSchedule:
+      type: object
+      properties:
+        date:
+          type: string
+          example: "20151201"
+        movies:
+          type: array
+          items:
+            $ref: "#/components/schemas/Movie"
